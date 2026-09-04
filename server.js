@@ -144,6 +144,10 @@ app.post("/v1/responses", async (req, res) => {
 app.post("/v1/messages", async (req, res) => {
   try {
     const messages = req.body.messages || [];
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return res.status(400).json({ type: "error", error: { type: "invalid_request_error", message: "messages is required" } });
+    }
+
     const system = typeof req.body.system === "string"
       ? [{ role: "system", content: req.body.system }]
       : Array.isArray(req.body.system)
@@ -158,21 +162,15 @@ app.post("/v1/messages", async (req, res) => {
           ? m.content.filter(c => c.type === "text").map(c => c.text).join("\n")
           : "",
     })).filter(m => m.role === "user" || m.role === "assistant" || m.role === "system");
+
     const model = resolveModel(req.body?.model);
     if (!model) return res.status(503).json({ type: "error", error: { type: "overloaded_error", message: "No available models discovered yet" } });
-    const useResponses = DEFAULT_MODEL.includes("muse") || availableModels.size === 0;
-const endpoint = useResponses ? `${UPSTREAM}/responses` : `${UPSTREAM}/chat/completions`;
-const openaiBody = useResponses ? {
-  model: model ?? resolveModel(req.body?.model),
-  input,
-  stream: req.body.stream === true,
-} : {
-  model: model ?? resolveModel(req.body?.model),
-  messages: [...system, ...messages].map(m => ({
-    role: m.role === "assistant" ? "assistant" : "user",
-    content: typeof m.content === "string" ? m.content : Array.isArray(m.content) ? m.content.filter(c => c.type === "text").map(c => c.text).join("\n") : "",
-  })).filter(m => m.role === "user" || m.role === "assistant"),
-};
+
+    const openaiBody = {
+      model,
+      input,
+      stream: req.body.stream === true,
+    };
 
     const resp = await upstreamFetch(`${UPSTREAM}/responses`, {
       method: "POST",
@@ -206,12 +204,11 @@ const openaiBody = useResponses ? {
       });
     }
 
-    // Streaming: parse upstream SSE, re-emit as Anthropic SSE
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
 
-    let msgId = "msg_" + Date.now();
+    let msgId = "msg_" + crypto.randomUUID();
     let first = true;
 
     const reader = resp.body.getReader();
@@ -237,7 +234,7 @@ const openaiBody = useResponses ? {
               if (first) {
                 send("message_start", {
                   type: "message_start",
-                  message: { id: msgId, type: "message", role: "assistant", content: [], model: model ?? resolveModel(req.body?.model), usage: { input_tokens: 0, output_tokens: 0 } },
+                  message: { id: msgId, type: "message", role: "assistant", content: [], model, usage: { input_tokens: 0, output_tokens: 0 } },
                 });
                 send("content_block_start", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
                 first = false;
@@ -245,7 +242,7 @@ const openaiBody = useResponses ? {
               send("content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: evt.delta || "" } });
             }
             if (evt.type === "response.completed") {
-              send("content_block_stop", { type: "content_block_stop", index: 0 });
+              if (!first) send("content_block_stop", { type: "content_block_stop", index: 0 });
               send("message_delta", {
                 type: "message_delta",
                 delta: { stop_reason: "end_turn", stop_sequence: null },
@@ -260,8 +257,13 @@ const openaiBody = useResponses ? {
     };
     pump().catch(() => res.end());
   } catch (err) {
-    res.status(500).json({ type: "error", error: { type: "api_error", message: String(err) } });
+    res.status(500).json({ type: "error", error: { type: "api_error", message: "Internal server error" } });
   }
+});
+
+// Global error handler (catches JSON parse errors etc)
+app.use((err, _req, res, _next) => {
+  res.status(err.status || 500).json({ error: { message: err.message || "Internal server error" } });
 });
 
 app.listen(PORT, HOST, () => {
