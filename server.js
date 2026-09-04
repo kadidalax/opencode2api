@@ -1,6 +1,24 @@
 import express from "express";
 import { ProxyAgent } from "undici";
 import crypto from "crypto";
+import { readFileSync, existsSync } from "fs";
+import { join, dirname } from "path";
+import { fileURLToPath } from "url";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const envPath = join(__dirname, ".env");
+if (existsSync(envPath)) {
+  for (const line of readFileSync(envPath, "utf-8").split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eq = trimmed.indexOf("=");
+    if (eq > 0) {
+      const key = trimmed.slice(0, eq).trim();
+      const val = trimmed.slice(eq + 1).trim();
+      if (!(key in process.env)) process.env[key] = val;
+    }
+  }
+}
 
 const app = express();
 const PORT = process.env.PORT || 3456;
