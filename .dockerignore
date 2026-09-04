@@ -1,3 +1,7 @@
 node_modules
 .tmp
 .env
+.git
+.github
+README.md
+*.md

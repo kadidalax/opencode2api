@@ -8,7 +8,7 @@
 .\start.ps1
 ```
 
-启动后监听 `http://127.0.0.1:3456`。
+启动后监听 `http://0.0.0.0:3456`。
 
 ## VPS Docker 部署
 
@@ -24,7 +24,7 @@ curl -o docker-compose.yml https://raw.githubusercontent.com/kadidalax/opencode2
 docker compose up -d
 
 # 4. 验证
-curl http://localhost:3456/health
+curl -H "Authorization: Bearer 你的密码" http://localhost:3456/health
 ```
 
 ## 远程调用配置
@@ -59,4 +59,5 @@ curl http://localhost:3456/health
 | `GET /v1/models` | 模型列表 | - |
 | `POST /v1/responses` | OpenAI Responses 格式 | Codex |
 | `POST /v1/messages` | Anthropic Messages 格式 | Claude Code |
+
 

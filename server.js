@@ -1,5 +1,6 @@
 import express from "express";
 import { ProxyAgent } from "undici";
+import crypto from "crypto";
 
 const app = express();
 const PORT = process.env.PORT || 3456;
@@ -7,9 +8,8 @@ const UPSTREAM = "https://opencode.ai/zen/v1";
 const GO_UPSTREAM = "https://opencode.ai/zen/go/v1";
 const DEFAULT_MODEL = process.env.DEFAULT_MODEL || "muse-spark-1.3-contributor-free";
 let availableModels = new Set();
-const HTTP_PROXY = process.env.HTTP_PROXY || "http://127.0.0.1:10808";
+const HTTP_PROXY = process.env.HTTP_PROXY || "";
 const dispatcher = HTTP_PROXY ? new ProxyAgent(HTTP_PROXY) : undefined;
-
 async function upstreamFetch(url, options = {}) {
   return fetch(url, { ...options, dispatcher });
 }
@@ -17,36 +17,54 @@ async function upstreamFetch(url, options = {}) {
 app.use(express.json({ limit: "50mb" }));
 
 const API_KEY = process.env.API_KEY || "";
+if (!API_KEY) {
+  console.warn("WARNING: API_KEY is not set. Anyone can use this proxy. Set API_KEY for production.");
+}
 const HOST = process.env.HOST || "0.0.0.0";
 
 app.use((req, res, next) => {
   if (!API_KEY) return next();
   const key = req.headers["authorization"]?.replace("Bearer ", "") || req.headers["x-api-key"];
-  if (key === API_KEY) return next();
+  const a = Buffer.from(String(key));
+const b = Buffer.from(API_KEY);
+if (a.length === b.length && crypto.timingSafeEqual(a, b)) return next();
   return res.status(401).json({ error: { type: "authentication_error", message: "Invalid or missing API key. Set Authorization: Bearer <key> or x-api-key header." } });
 });
 
 
 
+const FREE_PREFERENCE = "muse-spark-1.3-contributor-free";
 function resolveModel(requested) {
-  if (!requested || requested === "auto") return DEFAULT_MODEL;
-  if (availableModels.has(requested)) return requested;
-  return DEFAULT_MODEL;
+  if (requested && requested !== "auto" && availableModels.has(requested)) return requested;
+  if (availableModels.has(DEFAULT_MODEL)) return DEFAULT_MODEL;
+  if (availableModels.has(FREE_PREFERENCE)) return FREE_PREFERENCE;
+  for (const id of availableModels) {
+    if (id.includes("free")) return id;
+  }
+  if (availableModels.size > 0) return [...availableModels][0];
+  return null;
 }
 
 // Model discovery: check which models are free (no auth required)
 async function discoverFreeModels() {
-  availableModels.clear();
+  const next = new Set();
   const endpoints = [UPSTREAM, GO_UPSTREAM];
   for (const base of endpoints) {
     try {
-      const resp = await upstreamFetch(`${base}/models`);
+      const resp = await upstreamFetch(`${base}/models`, { signal: AbortSignal.timeout(15000) });
       if (!resp.ok) continue;
       const data = await resp.json();
-      for (const m of data.data || []) availableModels.add(m.id);
-    } catch {}
+      for (const m of data.data || []) next.add(m.id);
+    } catch (err) {
+      console.error(`Model discovery failed for ${base}:`, err.message);
+    }
   }
-  console.log(`Discovered ${availableModels.size} models`);
+  if (next.size > 0) {
+    availableModels = next;
+    console.log(`Discovered ${next.size} models`);
+  } else if (availableModels.size === 0) {
+    console.warn("No models discovered, will retry");
+  }
 }
 setInterval(discoverFreeModels, 5 * 60 * 1000).unref();
 discoverFreeModels();
@@ -56,26 +74,23 @@ app.get("/health", (_req, res) => {
   res.json({ status: "ok", upstream: UPSTREAM });
 });
 
-// Model list
+// Model list from cache
 app.get("/v1/models", async (_req, res) => {
-  try {
-    const resp = await upstreamFetch(`${UPSTREAM}/models`);
-    const data = await resp.json();
-    res.json(data);
-  } catch (err) {
-    res.status(502).json({ error: { message: "Upstream fetch failed", detail: String(err) } });
-  }
+  if (availableModels.size === 0) await discoverFreeModels();
+  const data = [...availableModels].map(id => ({ id, object: "model", owned_by: "opencode" }));
+  res.json({ object: "list", data });
 });
 
 // OpenAI Responses passthrough (Codex uses this)
 app.post("/v1/responses", async (req, res) => {
   try {
     const model = resolveModel(req.body?.model);
+    if (!model) return res.status(503).json({ error: { message: "No available models" } });
     const stream = req.body.stream === true;
     const resp = await upstreamFetch(`${UPSTREAM}/responses`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(upstreamBody),
+      body: JSON.stringify({ ...req.body, model }),
     });
 
     if (!resp.ok) {
@@ -108,7 +123,6 @@ app.post("/v1/responses", async (req, res) => {
   }
 });
 
-// Anthropic Messages endpoint (Claude Code uses this)
 app.post("/v1/messages", async (req, res) => {
   try {
     const messages = req.body.messages || [];
@@ -126,15 +140,16 @@ app.post("/v1/messages", async (req, res) => {
           ? m.content.filter(c => c.type === "text").map(c => c.text).join("\n")
           : "",
     })).filter(m => m.role === "user" || m.role === "assistant" || m.role === "system");
-    const useResponses = DEFAULT_MODEL.includes("muse") || availableModels.size === 0;
+    const model = resolveModel(req.body?.model);
+    if (!model) return res.status(503).json({ type: "error", error: { type: "overloaded_error", message: "No available models discovered yet" } });
     const useResponses = DEFAULT_MODEL.includes("muse") || availableModels.size === 0;
 const endpoint = useResponses ? `${UPSTREAM}/responses` : `${UPSTREAM}/chat/completions`;
 const openaiBody = useResponses ? {
-  model: resolveModel(req.body?.model),
+  model: model ?? resolveModel(req.body?.model),
   input,
   stream: req.body.stream === true,
 } : {
-  model: resolveModel(req.body?.model),
+  model: model ?? resolveModel(req.body?.model),
   messages: [...system, ...messages].map(m => ({
     role: m.role === "assistant" ? "assistant" : "user",
     content: typeof m.content === "string" ? m.content : Array.isArray(m.content) ? m.content.filter(c => c.type === "text").map(c => c.text).join("\n") : "",
@@ -204,7 +219,7 @@ const openaiBody = useResponses ? {
               if (first) {
                 send("message_start", {
                   type: "message_start",
-                  message: { id: msgId, type: "message", role: "assistant", content: [], model: resolveModel(req.body?.model), usage: { input_tokens: 0, output_tokens: 0 } },
+                  message: { id: msgId, type: "message", role: "assistant", content: [], model: model ?? resolveModel(req.body?.model), usage: { input_tokens: 0, output_tokens: 0 } },
                 });
                 send("content_block_start", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
                 first = false;
