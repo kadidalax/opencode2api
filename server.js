@@ -4,6 +4,9 @@ import { ProxyAgent } from "undici";
 const app = express();
 const PORT = process.env.PORT || 3456;
 const UPSTREAM = "https://opencode.ai/zen/v1";
+const GO_UPSTREAM = "https://opencode.ai/zen/go/v1";
+const DEFAULT_MODEL = process.env.DEFAULT_MODEL || "muse-spark-1.3-contributor-free";
+let availableModels = new Set();
 const HTTP_PROXY = process.env.HTTP_PROXY || "http://127.0.0.1:10808";
 const dispatcher = HTTP_PROXY ? new ProxyAgent(HTTP_PROXY) : undefined;
 
@@ -22,6 +25,31 @@ app.use((req, res, next) => {
   if (key === API_KEY) return next();
   return res.status(401).json({ error: { type: "authentication_error", message: "Invalid or missing API key. Set Authorization: Bearer <key> or x-api-key header." } });
 });
+
+
+
+function resolveModel(requested) {
+  if (!requested || requested === "auto") return DEFAULT_MODEL;
+  if (availableModels.has(requested)) return requested;
+  return DEFAULT_MODEL;
+}
+
+// Model discovery: check which models are free (no auth required)
+async function discoverFreeModels() {
+  availableModels.clear();
+  const endpoints = [UPSTREAM, GO_UPSTREAM];
+  for (const base of endpoints) {
+    try {
+      const resp = await upstreamFetch(`${base}/models`);
+      if (!resp.ok) continue;
+      const data = await resp.json();
+      for (const m of data.data || []) availableModels.add(m.id);
+    } catch {}
+  }
+  console.log(`Discovered ${availableModels.size} models`);
+}
+setInterval(discoverFreeModels, 5 * 60 * 1000).unref();
+discoverFreeModels();
 
 // Health check
 app.get("/health", (_req, res) => {
@@ -42,7 +70,7 @@ app.get("/v1/models", async (_req, res) => {
 // OpenAI Responses passthrough (Codex uses this)
 app.post("/v1/responses", async (req, res) => {
   try {
-    const upstreamBody = { ...req.body, model: "muse-spark-1.3-contributor-free" };
+    const model = resolveModel(req.body?.model);
     const stream = req.body.stream === true;
     const resp = await upstreamFetch(`${UPSTREAM}/responses`, {
       method: "POST",
@@ -98,12 +126,20 @@ app.post("/v1/messages", async (req, res) => {
           ? m.content.filter(c => c.type === "text").map(c => c.text).join("\n")
           : "",
     })).filter(m => m.role === "user" || m.role === "assistant" || m.role === "system");
-
-    const openaiBody = {
-      model: "muse-spark-1.3-contributor-free",
-      input,
-      stream: req.body.stream === true,
-    };
+    const useResponses = DEFAULT_MODEL.includes("muse") || availableModels.size === 0;
+    const useResponses = DEFAULT_MODEL.includes("muse") || availableModels.size === 0;
+const endpoint = useResponses ? `${UPSTREAM}/responses` : `${UPSTREAM}/chat/completions`;
+const openaiBody = useResponses ? {
+  model: resolveModel(req.body?.model),
+  input,
+  stream: req.body.stream === true,
+} : {
+  model: resolveModel(req.body?.model),
+  messages: [...system, ...messages].map(m => ({
+    role: m.role === "assistant" ? "assistant" : "user",
+    content: typeof m.content === "string" ? m.content : Array.isArray(m.content) ? m.content.filter(c => c.type === "text").map(c => c.text).join("\n") : "",
+  })).filter(m => m.role === "user" || m.role === "assistant"),
+};
 
     const resp = await upstreamFetch(`${UPSTREAM}/responses`, {
       method: "POST",
@@ -168,7 +204,7 @@ app.post("/v1/messages", async (req, res) => {
               if (first) {
                 send("message_start", {
                   type: "message_start",
-                  message: { id: msgId, type: "message", role: "assistant", content: [], model: "muse-spark-1.3-contributor-free", usage: { input_tokens: 0, output_tokens: 0 } },
+                  message: { id: msgId, type: "message", role: "assistant", content: [], model: resolveModel(req.body?.model), usage: { input_tokens: 0, output_tokens: 0 } },
                 });
                 send("content_block_start", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
                 first = false;
