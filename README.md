@@ -13,13 +13,14 @@
 ## VPS Docker 部署
 
 ```bash
-# 1. 克隆项目到 VPS
-git clone <repo-url> && cd muse-proxy
-
-# 2. 设置 API Key（必须改掉）
+# 1. 创建目录并写入配置
+mkdir muse-proxy && cd muse-proxy
 echo "API_KEY=你的密码" > .env
 
-# 3. 一键启动
+# 2. 下载 docker-compose.yml
+curl -o docker-compose.yml https://raw.githubusercontent.com/kadidalax/opencode2api/main/docker-compose.yml
+
+# 3. 一键启动（自动拉取镜像）
 docker compose up -d
 
 # 4. 验证
@@ -58,3 +59,4 @@ curl http://localhost:3456/health
 | `GET /v1/models` | 模型列表 | - |
 | `POST /v1/responses` | OpenAI Responses 格式 | Codex |
 | `POST /v1/messages` | Anthropic Messages 格式 | Claude Code |
+

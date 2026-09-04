@@ -1,6 +1,6 @@
 services:
   muse-proxy:
-    build: .
+    image: ghcr.io/kadidalax/opencode2api:latest
     ports:
       - "3456:3456"
     environment:
