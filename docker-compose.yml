@@ -1,0 +1,11 @@
+services:
+  muse-proxy:
+    build: .
+    ports:
+      - "3456:3456"
+    environment:
+      - PORT=3456
+      - HOST=0.0.0.0
+      - API_KEY=${API_KEY:-change-me-please}
+      - HTTP_PROXY=
+    restart: unless-stopped

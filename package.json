@@ -1,0 +1,14 @@
+{
+  "name": "muse-proxy",
+  "version": "1.0.0",
+  "description": "Local proxy for Muse Spark 1.3 Contributor Free via OpenCode Zen",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "undici": "^6.28.0"
+  }
+}
